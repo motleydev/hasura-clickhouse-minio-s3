@@ -1,0 +1,114 @@
+version: "3.8"
+services:
+  # Hasura
+  redis:
+    image: redis:7
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+    ports:
+      - 6379:6379
+  postgres:
+    image: postgres:15
+    restart: always
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: postgrespassword
+  hasura:
+    image: hasura/graphql-engine:v2.35.1
+    restart: always
+    ports:
+      - 8080:8080
+    environment:
+      ## Add your license key below
+      HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET}
+      HASURA_GRAPHQL_EE_LICENSE_KEY: ${HASURA_GRAPHQL_EE_LICENSE_KEY}
+      ## The metadata database for this Hasura GraphQL project. Can be changed to a managed postgres instance
+      HASURA_GRAPHQL_DATABASE_URL: postgres://postgres:postgrespassword@postgres:5432/postgres
+      # HASURA_GRAPHQL_READ_REPLICA_URLS: postgres://postgres:postgrespassword@postgres:5432/postgres
+
+      ## Optional settings
+      ## enable the console served by server
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+      ## enable required apis; metrics api exposes a prometheus endpoint, uncomment to enable
+      HASURA_GRAPHQL_ENABLED_APIS: "graphql,metadata,config,developer,pgdump,metrics"
+      ## secure metrics endpoint with a secret, uncomment to enable
+      HASURA_GRAPHQL_METRICS_SECRET: behold-prometheus
+      ## enable debugging mode. It is recommended to disable this in production
+      HASURA_GRAPHQL_DEV_MODE: "true"
+      HASURA_GRAPHQL_LOG_LEVEL: debug
+      ## enable offline console assets if you wish to access console without internet connectivity
+      # HASURA_GRAPHQL_CONSOLE_ASSETS_DIR: "/srv/console-assets"
+      HASURA_GRAPHQL_REDIS_URL: redis://redis:6379
+      HASURA_GRAPHQL_RATE_LIMIT_REDIS_URL: "redis://redis:6379"
+      HASURA_GRAPHQL_MAX_CACHE_SIZE: "200"
+      ## Redist conifg
+      HASURA_GRAPHQL_CACHE_REDIS_HOST: redis
+      HASURA_GRAPHQL_CACHE_REDIS_PORT: "6379"
+      HASURA_GRAPHQL_CACHE_REDIS_PASSWORD: your_redis_password
+      HASURA_GRAPHQL_CACHE_REDIS_DATABASE: your_redis_database
+      ## PG Database URL
+      PG_DB_1: postgres://postgres:postgrespassword@pg_db_1:5432/postgres
+      # Configures the connection to the Data Connector agent for Clickhouse by default
+      # You can also omit this and manually configure the same thing via the 'Data' tab, then 'Add Agent'
+      # in the Hasura console
+      HASURA_GRAPHQL_METADATA_DEFAULTS: '{"backend_configs":{"dataconnector":{"clickhouse":{"uri":"http://data-connector-agent:8080"}}}}'
+    depends_on:
+      redis:
+        condition: service_healthy
+      data-connector-agent:
+        condition: service_healthy
+  data-connector-agent:
+    image: hasura/clickhouse-data-connector:v2.35.2
+    restart: always
+    ports:
+      - 8081:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 5s
+  # Clickhouse
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    # user: "101:101"
+    container_name: clickhouse
+    hostname: clickhouse
+    volumes:
+      - ${PWD}/fs/volumes/clickhouse/etc/clickhouse-server/config.d/config.xml:/etc/clickhouse-server/config.d/config.xml
+      - ${PWD}/fs/volumes/clickhouse/etc/clickhouse-server/users.d/users.xml:/etc/clickhouse-server/users.d/users.xml
+      - ${PWD}/fs/volumes/clickhouse/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    depends_on:
+      - minio
+      - createbuckets
+  minio:
+    image: quay.io/minio/minio
+    container_name: minio
+    hostname: minio
+    command: server --address 0.0.0.0:10000 --console-address 0.0.0.0:10001 /data
+    ports:
+      - "127.0.0.1:10000:10000"
+      - "127.0.0.1:10001:10001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadminpassword
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:10000 minioadmin minioadminpassword;
+      /usr/bin/mc admin info myminio;
+      /usr/bin/mc mb myminio/clickhouse;
+      /usr/bin/mc policy set public myminio/clickhouse;
+      exit 0;
+      "
+# Hasura Volumes
+volumes:
+  db_data:
